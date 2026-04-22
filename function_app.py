@@ -1,3 +1,5 @@
+import os
+
 import azure.functions as func
 import azure.durable_functions as df
 import database.db as db
@@ -171,3 +173,28 @@ async def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
         status_code=200,
         mimetype="application/json"
     )
+
+@app.route(route="blob/{blob_id}", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
+async def serve_blob(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        blob_id = req.route_params.get("blob_id")
+        blob = db.get_blob(blob_id)
+
+        if not blob:
+            return error_response("Blob not found.", 404)
+
+        local_path = blob["local_path"]
+        if not os.path.exists(local_path):
+            return error_response("File not found on disk.", 404)
+
+        with open(local_path, "rb") as f:
+            data = f.read()
+
+        return func.HttpResponse(
+            body=data,
+            status_code=200,
+            mimetype=blob["mime_type"]
+        )
+    except Exception as e:
+        logging.error(e)
+        return error_response("Internal server error.", 500)

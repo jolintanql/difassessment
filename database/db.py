@@ -3,7 +3,6 @@ This module defines the database interaction functions for managing artifact met
 It includes functions for creating artifact metadata, updating results, and updating metadata status.
 """
 
-
 import json
 import logging
 import sqlite3
@@ -55,10 +54,19 @@ def init_db():
         FOREIGN KEY (artifact_id) REFERENCES artifacts (artifact_id)
     )
     """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS blobs (
+        blob_id TEXT PRIMARY KEY,
+        artifact_id TEXT NOT NULL,
+        original_url TEXT NOT NULL,
+        local_path TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        FOREIGN KEY (artifact_id) REFERENCES artifacts (artifact_id)
+    )
+    """)
 
     conn.commit()
-
-    # lightweight migration support if table already existed
+  # lightweight migration support if table already existed
     existing_cols = {
         row["name"] for row in cur.execute("PRAGMA table_info(artifacts)").fetchall()
     }
@@ -116,6 +124,7 @@ def update_metadata_status(artifact_id, case_id, status):
 
 
 def update_results(artifact_id, content, append=False):
+    import blob_service  # import here to avoid circular imports
     logging.info("db:update_results was triggered")
     conn = get_conn()
     cur = conn.cursor()
@@ -123,23 +132,18 @@ def update_results(artifact_id, content, append=False):
     metadata = content.get("metadata", {})
     contents = content.get("contents", [])
     has_more_data = content.get("has_more_data", [])
-    has_more_map = {item["content_type"]: item["has_more_data"] for item in has_more_data}
+    has_more_map = {item["content_type"]: item["has_more_data"]
+                    for item in has_more_data}
 
     cur.execute("""
         UPDATE artifacts
-        SET display_name = ?,
-            profile_pic = ?,
-            instagram_user_id = ?,
-            next_post_cursor = ?,
-            next_reel_cursor = ?,
-            has_more_posts = ?,
-            has_more_reels = ?
+        SET display_name = ?, profile_pic = ?, instagram_user_id = ?,
+            next_post_cursor = ?, next_reel_cursor = ?,
+            has_more_posts = ?, has_more_reels = ?
         WHERE artifact_id = ?
     """, (
-        metadata.get("display_name"),
-        metadata.get("profile_pic"),
-        metadata.get("instagram_user_id"),
-        metadata.get("next_post_cursor"),
+        metadata.get("display_name"), metadata.get("profile_pic"),
+        metadata.get("instagram_user_id"), metadata.get("next_post_cursor"),
         metadata.get("next_reel_cursor"),
         1 if has_more_map.get("post", False) else 0,
         1 if has_more_map.get("reel", False) else 0,
@@ -147,15 +151,42 @@ def update_results(artifact_id, content, append=False):
     ))
 
     if not append:
-        cur.execute("DELETE FROM contents WHERE artifact_id = ?", (artifact_id,))
+        cur.execute("DELETE FROM contents WHERE artifact_id = ?",
+                    (artifact_id,))
 
     for item in contents:
+        # download each media file and add blob url
+        updated_media = []
+        for media in item.get("media_content", []):
+            updated = dict(media)
+            original_url = media.get("original_url", "")
+            if original_url:
+                blob_id, local_path, mime_type = blob_service.download_and_save(
+                    original_url, artifact_id
+                )
+                if blob_id:
+                    updated["url"] = f"/api/blob/{blob_id}"
+                    save_blob(cur, blob_id, artifact_id,
+                              original_url, local_path, mime_type)
+
+            # handle thumbnail too
+            thumb_url = media.get("original_thumbnail_url", "")
+            if thumb_url:
+                blob_id, local_path, mime_type = blob_service.download_and_save(
+                    thumb_url, artifact_id
+                )
+                if blob_id:
+                    updated["thumbnail_url"] = f"/api/blob/{blob_id}"
+                    save_blob(cur, blob_id, artifact_id,
+                              thumb_url, local_path, mime_type)
+
+            updated_media.append(updated)
+
         cur.execute("""
             INSERT INTO contents (
                 artifact_id, error_message, owners_json, caption,
                 datetime, content_type, media_content_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             artifact_id,
             item.get("error_message", ""),
@@ -163,7 +194,7 @@ def update_results(artifact_id, content, append=False):
             item.get("caption", ""),
             item.get("datetime", ""),
             item.get("content_type", ""),
-            json.dumps(item.get("media_content", []))
+            json.dumps(updated_media)
         ))
 
     conn.commit()
@@ -236,7 +267,7 @@ def get_artifact_by_id(artifact_id):
         conn.close()
         return None
 
-    cur.execute("SELECT * FROM contents WHERE artifact_id = ? ORDER BY id ASC", (artifact_id,))
+    cur.execute("SELECT * FROM contents WHERE artifact_id = ?", (artifact_id,))
     contents = cur.fetchall()
     conn.close()
 
@@ -252,7 +283,8 @@ def list_artifacts():
 
     results = []
     for artifact in artifacts:
-        cur.execute("SELECT * FROM contents WHERE artifact_id = ? ORDER BY id ASC", (artifact["artifact_id"],))
+        cur.execute("SELECT * FROM contents WHERE artifact_id = ?",
+                    (artifact["artifact_id"],))
         contents = cur.fetchall()
         results.append(build_response(artifact, contents))
 
@@ -296,3 +328,19 @@ def get_pagination_context(artifact_id, content_type):
         "instagram_user_id": row["instagram_user_id"],
         "cursor": row["next_post_cursor"] if content_type == "post" else row["next_reel_cursor"],
     }
+
+
+def save_blob(cur, blob_id, artifact_id, original_url, local_path, mime_type):
+    cur.execute("""
+        INSERT OR IGNORE INTO blobs (blob_id, artifact_id, original_url, local_path, mime_type)
+        VALUES (?, ?, ?, ?, ?)
+    """, (blob_id, artifact_id, original_url, local_path, mime_type))
+
+
+def get_blob(blob_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM blobs WHERE blob_id = ?", (blob_id,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
