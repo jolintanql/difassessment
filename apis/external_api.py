@@ -338,7 +338,7 @@ def trigger_external(
     )
 
     posts_data = _normalize_posts_response(posts_resp, identifier)
-    reels_data = _normalize_reels_response(reels_resp, identifier)
+
 
     contents: List[Dict[str, Any]] = []
     contents.extend(posts_data["contents"])
