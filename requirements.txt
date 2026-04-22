@@ -6,3 +6,4 @@ azure-functions
 azure-functions-durable
 pydantic
 requests
+pytest

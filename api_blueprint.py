@@ -33,45 +33,64 @@ def invalid_execution(results):
 @api_bp.orchestration_trigger(context_name="context")
 def polling_orchestrator(context: df.DurableOrchestrationContext):
     job = json.loads(context.get_input())
-    case_info = {"artifact_id": job.get("artifact_id"), "case_id": job.get("case_id"), "identifier": job.get("identifier") }
+
+    case_info = {
+        "artifact_id": job.get("artifact_id"),
+        "case_id": job.get("case_id"),
+        "identifier": job.get("identifier")
+    }
 
     
-    results = yield context.call_activity(startJob, job) # output of activity_result_output
+    results = yield context.call_activity("startJob", job)
 
     if error := invalid_execution(results):
         job_status = case_info | {"status": "failed"}
-        yield context.call_activity(updateStatus, job_status)
+        yield context.call_activity("updateStatus", job_status)
         return error
 
     job_status = case_info | {"status": "success"}
-    yield context.call_activity(updateStatus, job_status)
+    yield context.call_activity("updateStatus", job_status)
 
     return "All tasks completed."
-
 
 @api_bp.activity_trigger(input_name="jobInfo")
 def startJob(jobInfo):
     artifact_id = jobInfo.get("artifact_id")
     case_id = jobInfo.get("case_id")
     identifier = jobInfo.get("identifier")
-    processing = True
+    content_type = jobInfo.get("content_type")
+    cursor = jobInfo.get("cursor")
+    instagram_user_id = jobInfo.get("instagram_user_id")
+
     logging.info(f"{artifact_id}:startJob")
-    while processing:
-        logging.info(f"{artifact_id}:calling API")
-        try:
-            resp = external_api.trigger_external(identifier, case_id, artifact_id)
-            if resp["status"] == "success":
-                results = db.update_results(artifact_id, resp["results"])
-                processing = False
-                return activity_result_output(True, None, results)
-            else:
-                status = resp["status"]
-                raise APIException("API call failed.", 500, status, resp.get("error_message", ""))
-        except Exception as e:
-            logging.error(f"{artifact_id}: startJobError: {e}")
-            traceback.print_exception(e)
-            return activity_result_output(False, e, None)
-        
+
+    if content_type and not cursor:
+        pagination_ctx = db.get_pagination_context(artifact_id, content_type)
+        if pagination_ctx:
+            cursor = pagination_ctx.get("cursor")
+            instagram_user_id = pagination_ctx.get("instagram_user_id")
+            identifier = pagination_ctx.get("identifier") or identifier
+
+    try:
+        resp = external_api.trigger_external(
+            identifier=identifier,
+            case_id=case_id,
+            artifact_id=artifact_id,
+            content_type=content_type,
+            cursor=cursor,
+            instagram_user_id=instagram_user_id,
+        )
+
+        if resp["status"] == "success":
+            append = bool(content_type)
+            results = db.update_results(artifact_id, resp["results"], append=append)
+            return activity_result_output(True, "", results)
+
+        raise APIException("API call failed.", 500, resp["status"], resp.get("error_message", ""))
+
+    except Exception as e:
+        logging.error(f"{artifact_id}: startJobError: {e}", exc_info=True)  # ✅ replaces traceback.print_exception
+        return activity_result_output(False, str(e), None)
 
 @api_bp.activity_trigger(input_name="jobStatus")
 def updateStatus(jobStatus):

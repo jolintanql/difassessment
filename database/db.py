@@ -3,6 +3,7 @@ This module defines the database interaction functions for managing artifact met
 It includes functions for creating artifact metadata, updating results, and updating metadata status.
 """
 
+
 import json
 import logging
 import sqlite3
@@ -31,6 +32,11 @@ def init_db():
         platform TEXT NOT NULL DEFAULT 'instagram',
         display_name TEXT,
         profile_pic TEXT,
+        instagram_user_id TEXT,
+        next_post_cursor TEXT,
+        next_reel_cursor TEXT,
+        has_more_posts INTEGER NOT NULL DEFAULT 0,
+        has_more_reels INTEGER NOT NULL DEFAULT 0,
         created_datetime TEXT NOT NULL,
         status TEXT NOT NULL
     )
@@ -49,6 +55,25 @@ def init_db():
         FOREIGN KEY (artifact_id) REFERENCES artifacts (artifact_id)
     )
     """)
+
+    conn.commit()
+
+    # lightweight migration support if table already existed
+    existing_cols = {
+        row["name"] for row in cur.execute("PRAGMA table_info(artifacts)").fetchall()
+    }
+
+    alter_statements = {
+        "instagram_user_id": "ALTER TABLE artifacts ADD COLUMN instagram_user_id TEXT",
+        "next_post_cursor": "ALTER TABLE artifacts ADD COLUMN next_post_cursor TEXT",
+        "next_reel_cursor": "ALTER TABLE artifacts ADD COLUMN next_reel_cursor TEXT",
+        "has_more_posts": "ALTER TABLE artifacts ADD COLUMN has_more_posts INTEGER NOT NULL DEFAULT 0",
+        "has_more_reels": "ALTER TABLE artifacts ADD COLUMN has_more_reels INTEGER NOT NULL DEFAULT 0",
+    }
+
+    for col, stmt in alter_statements.items():
+        if col not in existing_cols:
+            cur.execute(stmt)
 
     conn.commit()
     conn.close()
@@ -90,23 +115,39 @@ def update_metadata_status(artifact_id, case_id, status):
     conn.close()
 
 
-def update_results(artifact_id, content):
+def update_results(artifact_id, content, append=False):
     logging.info("db:update_results was triggered")
     conn = get_conn()
     cur = conn.cursor()
 
     metadata = content.get("metadata", {})
     contents = content.get("contents", [])
+    has_more_data = content.get("has_more_data", [])
+    has_more_map = {item["content_type"]: item["has_more_data"] for item in has_more_data}
 
     cur.execute("""
         UPDATE artifacts
-        SET display_name = ?, profile_pic = ?
+        SET display_name = ?,
+            profile_pic = ?,
+            instagram_user_id = ?,
+            next_post_cursor = ?,
+            next_reel_cursor = ?,
+            has_more_posts = ?,
+            has_more_reels = ?
         WHERE artifact_id = ?
     """, (
         metadata.get("display_name"),
         metadata.get("profile_pic"),
+        metadata.get("instagram_user_id"),
+        metadata.get("next_post_cursor"),
+        metadata.get("next_reel_cursor"),
+        1 if has_more_map.get("post", False) else 0,
+        1 if has_more_map.get("reel", False) else 0,
         artifact_id
     ))
+
+    if not append:
+        cur.execute("DELETE FROM contents WHERE artifact_id = ?", (artifact_id,))
 
     for item in contents:
         cur.execute("""
@@ -133,8 +174,20 @@ def update_results(artifact_id, content):
 def build_response(artifact, contents):
     artifact = dict(artifact)
 
+    has_more_data = [
+        {
+            "content_type": "post",
+            "has_more_data": bool(artifact.get("has_more_posts"))
+        },
+        {
+            "content_type": "reel",
+            "has_more_data": bool(artifact.get("has_more_reels"))
+        }
+    ]
+
     response = {
         "status": artifact["status"],
+        "has_more_data": has_more_data,
         "metadata": {
             "platform": artifact["platform"],
             "identifier": artifact["identifier"],
@@ -163,6 +216,15 @@ def build_response(artifact, contents):
     return response
 
 
+def get_artifact_row(artifact_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
 def get_artifact_by_id(artifact_id):
     conn = get_conn()
     cur = conn.cursor()
@@ -174,7 +236,7 @@ def get_artifact_by_id(artifact_id):
         conn.close()
         return None
 
-    cur.execute("SELECT * FROM contents WHERE artifact_id = ?", (artifact_id,))
+    cur.execute("SELECT * FROM contents WHERE artifact_id = ? ORDER BY id ASC", (artifact_id,))
     contents = cur.fetchall()
     conn.close()
 
@@ -190,7 +252,7 @@ def list_artifacts():
 
     results = []
     for artifact in artifacts:
-        cur.execute("SELECT * FROM contents WHERE artifact_id = ?", (artifact["artifact_id"],))
+        cur.execute("SELECT * FROM contents WHERE artifact_id = ? ORDER BY id ASC", (artifact["artifact_id"],))
         contents = cur.fetchall()
         results.append(build_response(artifact, contents))
 
@@ -211,3 +273,26 @@ def find_in_progress_artifact(case_id, identifier):
     row = cur.fetchone()
     conn.close()
     return row["artifact_id"] if row else None
+
+
+def get_pagination_context(artifact_id, content_type):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT artifact_id, identifier, instagram_user_id, next_post_cursor, next_reel_cursor
+        FROM artifacts
+        WHERE artifact_id = ?
+    """, (artifact_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    row = dict(row)
+    return {
+        "artifact_id": row["artifact_id"],
+        "identifier": row["identifier"],
+        "instagram_user_id": row["instagram_user_id"],
+        "cursor": row["next_post_cursor"] if content_type == "post" else row["next_reel_cursor"],
+    }

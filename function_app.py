@@ -47,46 +47,86 @@ def validate_input(req, expectedFields) -> tuple[bool, Optional[func.HttpRespons
             req_body[expectedField] = value
     return True, None, req_body
 
-async def _trigger_download(client, artifact_id, case_id, identifier, description):
-    db.create_artifact_metadata(artifact_id, case_id, identifier, description)
-
-    await client.start_new('polling_orchestrator', client_input=json.dumps({
-        "artifact_id": artifact_id,
-        "case_id": case_id,
-        "identifier": identifier,
-        "description": description,
-    }))
-
-    return artifact_id
-
 @app.route(route="artifacts", auth_level=func.AuthLevel.FUNCTION, methods=["POST"])
 @app.durable_client_input(client_name="client")
 async def trigger_download(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
     logging.info("Python HTTP artifact function processed a request.")
     try:
-        valid, error_resp, body = validate_input(req, ["case_id", "identifier", "description"])
-        if not valid:
-            return error_resp
-        
-        case_id = body["case_id"]
-        identifier = body["identifier"]
-        description = body["description"]
+        try:
+            request_body = req.get_json()
+        except ValueError:
+            return error_response("Invalid request body", 400)
 
-        existing_artifact_id = db.find_in_progress_artifact(case_id, identifier)
-        if existing_artifact_id:
+        is_initial = all(k in request_body for k in ["case_id", "identifier", "description"])
+        is_pagination = all(k in request_body for k in ["case_id", "artifact_id", "content_type"])
+
+        if not is_initial and not is_pagination:
+            return error_response(
+                "Invalid request body. Expected either "
+                "['case_id', 'identifier', 'description'] or "
+                "['case_id', 'artifact_id', 'content_type'].",
+                400
+            )
+
+        if is_initial:
+            case_id = request_body["case_id"]
+            identifier = request_body["identifier"]
+            description = request_body["description"]
+
+            existing_artifact_id = db.find_in_progress_artifact(case_id, identifier)
+            if existing_artifact_id:
+                return func.HttpResponse(
+                    json.dumps({"artifact_id": existing_artifact_id}),
+                    status_code=200,
+                    mimetype="application/json"
+                )
+
+            artifact_id = uuid.uuid4().hex
+            db.create_artifact_metadata(artifact_id, case_id, identifier, description)
+            await client.start_new(
+                "polling_orchestrator",
+                None,
+                json.dumps({
+                    "artifact_id": artifact_id,
+                    "case_id": case_id,
+                    "identifier": identifier,
+                    "description": description,
+                })
+            )
             return func.HttpResponse(
-                json.dumps({"artifact_id": existing_artifact_id}),
+                json.dumps({"artifact_id": artifact_id}),
                 status_code=200,
                 mimetype="application/json"
             )
 
-        artifact_id = uuid.uuid4().hex
-        artifact_id = await _trigger_download(client, artifact_id, case_id, identifier, description)
+        # pagination request
+        case_id = request_body["case_id"]
+        artifact_id = request_body["artifact_id"]
+        content_type = request_body["content_type"]
 
+        if content_type not in ("post", "reel"):
+            return error_response("content_type must be 'post' or 'reel'.", 400)
+
+        ctx = db.get_pagination_context(artifact_id, content_type)
+        if not ctx:
+            return error_response("Artifact not found.", 404)
+
+        await client.start_new(
+            "polling_orchestrator",
+            None,
+            json.dumps({
+                "artifact_id": artifact_id,
+                "case_id": case_id,
+                "identifier": ctx["identifier"],
+                "content_type": content_type,
+                "cursor": ctx["cursor"],
+                "instagram_user_id": ctx["instagram_user_id"],
+            })
+        )
         return func.HttpResponse(
-                json.dumps({"artifact_id": artifact_id}),
-                status_code=200,
-                mimetype="application/json"
+            json.dumps({"artifact_id": artifact_id}),
+            status_code=200,
+            mimetype="application/json"
         )
 
     except Exception as e:
