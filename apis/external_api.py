@@ -156,28 +156,10 @@ def _normalize_post(item: Dict[str, Any], identifier: str) -> Dict[str, Any]:
         "media_content": media_content,
     }
 
-
-def _normalize_reel(item: Dict[str, Any], identifier: str) -> Dict[str, Any]:
-    return {
-        "error_message": "",
-        "owners": [identifier],
-        "caption": _extract_caption(item),
-        "datetime": _to_iso8601(item.get("taken_at")),
-        "content_type": "reel",
-        "media_content": [
-            {
-                "media_type": "video",
-                "original_url": _extract_best_video(item) or "",
-                "original_thumbnail_url": _extract_best_image(item) or "",
-            }
-        ],
-    }
-
 def _normalize_reel(item, identifier):
     video_url = _extract_best_video(item)
     thumbnail = _extract_best_image(item)
 
-    # 🚫 skip empty reels
     if not video_url:
         return None
 
@@ -195,6 +177,8 @@ def _normalize_reel(item, identifier):
             }
         ],
     }
+
+
 
 def trigger_external(identifier: str, case_id: str, artifact_id: str) -> Dict[str, Any]:
     logging.info(
@@ -229,8 +213,13 @@ def trigger_external(identifier: str, case_id: str, artifact_id: str) -> Dict[st
     )
 
     contents: List[Dict[str, Any]] = []
+    #posts
     contents.extend(_normalize_post(item, identifier) for item in post_items)
-    contents.extend(_normalize_reel(item, identifier) for item in reel_items)
+    #reels
+    for item in reel_items:
+        reel = _normalize_reel(item,identifier)
+        if reel:
+            contents.append(reel)
 
     return {
         "status": "success",
