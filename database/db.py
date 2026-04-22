@@ -8,6 +8,7 @@ import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from models.artifact import ArtifactMetadata, ArtifactContent, MediaContent
 
 DB_PATH = Path("artifacts.db")
 
@@ -203,46 +204,55 @@ def update_results(artifact_id, content, append=False):
 
 
 def build_response(artifact, contents):
+    
     artifact = dict(artifact)
 
     has_more_data = [
-        {
-            "content_type": "post",
-            "has_more_data": bool(artifact.get("has_more_posts"))
-        },
-        {
-            "content_type": "reel",
-            "has_more_data": bool(artifact.get("has_more_reels"))
-        }
+        {"content_type": "post", "has_more_data": bool(artifact.get("has_more_posts"))},
+        {"content_type": "reel", "has_more_data": bool(artifact.get("has_more_reels"))}
     ]
+
+    metadata = ArtifactMetadata(
+        artifact_id=artifact["artifact_id"],
+        case_id=artifact["case_id"],
+        description=artifact["description"],
+        identifier=artifact["identifier"],
+        platform=artifact["platform"],
+        display_name=artifact.get("display_name"),
+        profile_pic=artifact.get("profile_pic"),
+        created_datetime=artifact["created_datetime"],
+        status=artifact["status"],
+    ).model_dump(
+        exclude_none=True,
+        exclude={"artifact_id", "case_id", "created_datetime", "status"}
+    )
 
     response = {
         "status": artifact["status"],
         "has_more_data": has_more_data,
-        "metadata": {
-            "platform": artifact["platform"],
-            "identifier": artifact["identifier"],
-            "description": artifact["description"]
-        },
+        "metadata": metadata,
         "contents": []
     }
 
-    if artifact.get("display_name"):
-        response["metadata"]["display_name"] = artifact["display_name"]
-
-    if artifact.get("profile_pic"):
-        response["metadata"]["profile_pic"] = artifact["profile_pic"]
-
     for row in contents:
         row = dict(row)
-        response["contents"].append({
-            "error_message": row["error_message"] or "",
-            "owners": json.loads(row["owners_json"] or "[]"),
-            "caption": row["caption"] or "",
-            "datetime": row["datetime"],
-            "content_type": row["content_type"],
-            "media_content": json.loads(row["media_content_json"] or "[]")
-        })
+
+        media_content = [
+            MediaContent(**m).model_dump(exclude_none=True)
+            for m in json.loads(row["media_content_json"] or "[]")
+        ]
+
+        content = ArtifactContent(
+            artifact_id=artifact["artifact_id"],
+            error_message=row["error_message"] or "",
+            owners=json.loads(row["owners_json"] or "[]"),
+            caption=row["caption"] or "",
+            datetime=row["datetime"],
+            content_type=row["content_type"],
+            media_content=media_content,
+        ).model_dump(exclude={"artifact_id"})
+
+        response["contents"].append(content)
 
     return response
 

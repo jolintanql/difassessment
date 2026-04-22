@@ -1,7 +1,7 @@
 """
 This module defines the data models for artifact metadata and content using Pydantic.
 """
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -13,7 +13,7 @@ class ArtifactMetadata(BaseModel):
     platform: str="instagram"
     display_name: Optional[str] = None
     profile_pic: Optional[str] = None
-    created_datetime: str = Field(default_factory = lambda: datetime.now(UTC).isoformat())
+    created_datetime: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     status: str = "processing"
 
 
