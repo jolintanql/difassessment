@@ -5,6 +5,7 @@ import json
 import uuid
 from api_blueprint import api_bp
 import logging
+from typing import Optional, Tuple
 
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
@@ -15,6 +16,7 @@ console_handler.setFormatter(formatter)
 logging.getLogger().addHandler(console_handler)
 
 app = df.DFApp()
+db.init_db()
 
 app.register_blueprint(api_bp)
 
@@ -29,7 +31,7 @@ def error_response(response, status_code):
             mimetype="application/json"
         )
 
-def validate_input(req, expectedFields) -> tuple[bool, None | func.HttpResponse, dict]:
+def validate_input(req, expectedFields) -> tuple[bool, Optional[func.HttpResponse], dict]:
     try:
         request_body = req.get_json()
     except ValueError:
@@ -46,13 +48,13 @@ def validate_input(req, expectedFields) -> tuple[bool, None | func.HttpResponse,
     return True, None, req_body
 
 async def _trigger_download(client, artifact_id, case_id, identifier, description):
-
     db.create_artifact_metadata(artifact_id, case_id, identifier, description)
 
     await client.start_new('polling_orchestrator', client_input=json.dumps({
         "artifact_id": artifact_id,
         "case_id": case_id,
         "identifier": identifier,
+        "description": description,
     }))
 
     return artifact_id
@@ -70,8 +72,15 @@ async def trigger_download(req: func.HttpRequest, client: df.DurableOrchestratio
         identifier = body["identifier"]
         description = body["description"]
 
-        artifact_id = uuid.uuid4().hex
+        existing_artifact_id = db.find_in_progress_artifact(case_id, identifier)
+        if existing_artifact_id:
+            return func.HttpResponse(
+                json.dumps({"artifact_id": existing_artifact_id}),
+                status_code=200,
+                mimetype="application/json"
+            )
 
+        artifact_id = uuid.uuid4().hex
         artifact_id = await _trigger_download(client, artifact_id, case_id, identifier, description)
 
         return func.HttpResponse(
@@ -83,11 +92,42 @@ async def trigger_download(req: func.HttpRequest, client: df.DurableOrchestratio
     except Exception as e:
         logging.error(e)
         return error_response("Internal server error.", 500)
+
+@app.route(route="artifacts", auth_level=func.AuthLevel.FUNCTION, methods=["GET"])
+async def list_all_artifacts(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        results = db.list_artifacts()
+        return func.HttpResponse(
+            json.dumps(results),
+            status_code=200,
+            mimetype="application/json"
+        )
+    except Exception as e:
+        logging.error(e)
+        return error_response("Internal server error.", 500)
+
+@app.route(route="artifacts/{id}", auth_level=func.AuthLevel.FUNCTION, methods=["GET"])
+async def get_artifact(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        artifact_id = req.route_params.get("id")
+        result = db.get_artifact_by_id(artifact_id)
+
+        if not result:
+            return error_response("Artifact not found.", 404)
+
+        return func.HttpResponse(
+            json.dumps(result),
+            status_code=200,
+            mimetype="application/json"
+        )
+    except Exception as e:
+        logging.error(e)
+        return error_response("Internal server error.", 500)
     
 @app.route(route="health", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 async def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(
-        json.dumps({"message" : "success"}),
+        json.dumps({"status": "ok"}),
         status_code=200,
         mimetype="application/json"
     )
