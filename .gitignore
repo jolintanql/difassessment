@@ -51,3 +51,6 @@ __azurite_db*__.json
 artifacts.dbblobs/
 test_image.jpg
 artifacts.db
+
+blobs/
+test_image.jpg
