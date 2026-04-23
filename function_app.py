@@ -1,5 +1,4 @@
 import os
-
 import azure.functions as func
 import azure.durable_functions as df
 import database.db as db
@@ -12,7 +11,8 @@ from typing import Optional, Tuple
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 
-formatter = logging.Formatter('%(asctime)s.%(msecs)03d:%(name)s:%(levelname)s| %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+formatter = logging.Formatter(
+    '%(asctime)s.%(msecs)03d:%(name)s:%(levelname)s| %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 console_handler.setFormatter(formatter)
 
 logging.getLogger().addHandler(console_handler)
@@ -22,23 +22,25 @@ db.init_db()
 
 app.register_blueprint(api_bp)
 
+
 def error_response(response, status_code):
     if type(response) == bytes:
         payload = response
     else:
         payload = json.dumps({"message": response})
     return func.HttpResponse(
-            payload,
-            status_code=status_code,
-            mimetype="application/json"
-        )
+        payload,
+        status_code=status_code,
+        mimetype="application/json"
+    )
+
 
 def validate_input(req, expectedFields) -> tuple[bool, Optional[func.HttpResponse], dict]:
     try:
         request_body = req.get_json()
     except ValueError:
         return False, error_response("Invalid request body", 400), {}
-    
+
     req_body = {}
 
     for expectedField in expectedFields:
@@ -49,7 +51,8 @@ def validate_input(req, expectedFields) -> tuple[bool, Optional[func.HttpRespons
             req_body[expectedField] = value
     return True, None, req_body
 
-@app.route(route="artifacts", auth_level=func.AuthLevel.FUNCTION, methods=["POST"])
+
+@app.route(route="artifacts", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 @app.durable_client_input(client_name="client")
 async def trigger_download(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
     logging.info("Python HTTP artifact function processed a request.")
@@ -59,8 +62,10 @@ async def trigger_download(req: func.HttpRequest, client: df.DurableOrchestratio
         except ValueError:
             return error_response("Invalid request body", 400)
 
-        is_initial = all(k in request_body for k in ["case_id", "identifier", "description"])
-        is_pagination = all(k in request_body for k in ["case_id", "artifact_id", "content_type"])
+        is_initial = all(k in request_body for k in [
+                         "case_id", "identifier", "description"])
+        is_pagination = all(k in request_body for k in [
+                            "case_id", "artifact_id", "content_type"])
 
         if not is_initial and not is_pagination:
             return error_response(
@@ -75,7 +80,8 @@ async def trigger_download(req: func.HttpRequest, client: df.DurableOrchestratio
             identifier = request_body["identifier"]
             description = request_body["description"]
 
-            existing_artifact_id = db.find_in_progress_artifact(case_id, identifier)
+            existing_artifact_id = db.find_in_progress_artifact(
+                case_id, identifier)
             if existing_artifact_id:
                 return func.HttpResponse(
                     json.dumps({"artifact_id": existing_artifact_id}),
@@ -84,7 +90,8 @@ async def trigger_download(req: func.HttpRequest, client: df.DurableOrchestratio
                 )
 
             artifact_id = uuid.uuid4().hex
-            db.create_artifact_metadata(artifact_id, case_id, identifier, description)
+            db.create_artifact_metadata(
+                artifact_id, case_id, identifier, description)
             await client.start_new(
                 "polling_orchestrator",
                 None,
@@ -135,7 +142,8 @@ async def trigger_download(req: func.HttpRequest, client: df.DurableOrchestratio
         logging.error(e)
         return error_response("Internal server error.", 500)
 
-@app.route(route="artifacts", auth_level=func.AuthLevel.FUNCTION, methods=["GET"])
+
+@app.route(route="artifacts", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 async def list_all_artifacts(req: func.HttpRequest) -> func.HttpResponse:
     try:
         results = db.list_artifacts()
@@ -148,7 +156,8 @@ async def list_all_artifacts(req: func.HttpRequest) -> func.HttpResponse:
         logging.error(e)
         return error_response("Internal server error.", 500)
 
-@app.route(route="artifacts/{id}", auth_level=func.AuthLevel.FUNCTION, methods=["GET"])
+
+@app.route(route="artifacts/{id}", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 async def get_artifact(req: func.HttpRequest) -> func.HttpResponse:
     try:
         artifact_id = req.route_params.get("id")
@@ -165,7 +174,8 @@ async def get_artifact(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error(e)
         return error_response("Internal server error.", 500)
-    
+
+
 @app.route(route="health", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 async def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(
@@ -173,6 +183,7 @@ async def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
         status_code=200,
         mimetype="application/json"
     )
+
 
 @app.route(route="blob/{blob_id}", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 async def serve_blob(req: func.HttpRequest) -> func.HttpResponse:

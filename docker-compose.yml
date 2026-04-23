@@ -1,0 +1,21 @@
+services:
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    ports:
+      - "10000:10000"
+      - "10001:10001"
+      - "10002:10002"
+
+  app:
+    platform: linux/amd64
+    build: .
+    container_name: difassessment-app
+    depends_on:
+      - azurite
+    ports:
+      - "8080:80"
+    environment:
+      FUNCTIONS_WORKER_RUNTIME: python
+      AzureWebJobsStorage: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;QueueEndpoint=http://azurite:10001/devstoreaccount1;TableEndpoint=http://azurite:10002/devstoreaccount1;"
+      SOCIAVAULT_API_KEY: "${SOCIAVAULT_API_KEY}"
+

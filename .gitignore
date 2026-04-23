@@ -54,3 +54,8 @@ artifacts.db
 
 blobs/
 test_image.jpg
+
+.DS_Store
+test.jpg
+test.mp4
+.env

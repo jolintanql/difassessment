@@ -67,7 +67,7 @@ def init_db():
     """)
 
     conn.commit()
-  # lightweight migration support if table already existed
+  # lightweight migration support if table already exist
     existing_cols = {
         row["name"] for row in cur.execute("PRAGMA table_info(artifacts)").fetchall()
     }
