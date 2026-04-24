@@ -9,7 +9,8 @@ The service accepts a profile identifier, starts crawling asynchronously, stores
 ## Features
 
 - Asynchronous crawl execution using Azure Durable Functions
-- Support for public Instagram posts and reels
+- Support for publicly available Instagram posts and reels
+- Integration with the free SociaVault Instagram API
 - SQLite-based persistence for artifacts, contents, and blob metadata
 - Pagination support for posts and reels
 - Duplicate in-progress request detection
@@ -43,7 +44,7 @@ The service accepts a profile identifier, starts crawling asynchronously, stores
 - [Python 3.10 - 3.13](https://www.python.org/downloads/)
 - [Docker / Docker Desktop](https://www.docker.com/products/docker-desktop/)
 - [Azure Functions Core Tools](https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local)
-- [SociaVault API Key](https://sociavault.com/)
+- [SociaVault](https://sociavault.com/) free API key
 
 ### Option 1: Run with Docker Compose
 
@@ -66,6 +67,8 @@ Verify that both services are running:
 ```shell
 docker compose ps
 ```
+
+The screenshot below shows both the application container and Azurite running successfully.
 
 ![Docker Compose Service Status](./screenshots/docker-compose-ps.png)
 
@@ -134,6 +137,8 @@ curl -s http://localhost:7071/api/health | jq
 }
 ```
 
+The screenshot below shows the health endpoint returning a successful JSON response.
+
 ![Health Check Screenshot](./screenshots/health-check.png)
 
 ### Start New Download
@@ -151,6 +156,8 @@ curl -s -X POST http://localhost:7071/api/artifacts \
   "artifact_id": "XXX"
 }
 ```
+
+The screenshot below shows a new crawl request returning an `artifact_id` immediately.
 
 ![Start Download Screenshot](./screenshots/start-download.png)
 
@@ -176,6 +183,8 @@ curl -s http://localhost:7071/api/artifacts/<artifact_id> | jq
   }
 }
 ```
+
+The screenshot below shows the artifact while it is still being processed.
 
 ![Artifact Processing Screenshot](./screenshots/artifact-processing.png)
 
@@ -206,11 +215,30 @@ curl -s http://localhost:7071/api/artifacts/<artifact_id> | jq '{status, metadat
 }
 ```
 
+The screenshot below shows a successful completed artifact response with blob-backed media URLs.
+
 ![Artifact Success Screenshot](./screenshots/artifact-success.png)
 
 ### Pagination
 
-Pagination is triggered with a `POST /api/artifacts` request using the existing `artifact_id` and a `content_type` such as `post` or `reel`.
+Pagination allows the existing artifact to be extended with additional results instead of creating a new artifact.
+
+Before requesting another page, the artifact can be queried to check how many content items have already been stored.
+
+```shell
+curl -s http://localhost:7071/api/artifacts/<artifact_id> | jq '{status, content_count: (.contents | length)}'
+```
+
+**Example result before pagination**
+
+```json
+{
+  "status": "success",
+  "content_count": 24
+}
+```
+
+A pagination request can then be sent using the same `artifact_id` together with the desired `content_type` such as `post` or `reel`.
 
 ```shell
 curl -s -X POST http://localhost:7071/api/artifacts \
@@ -226,13 +254,17 @@ curl -s -X POST http://localhost:7071/api/artifacts \
 }
 ```
 
-To verify that pagination appended more results, the artifact can be queried again and the content count compared:
+The screenshot below shows the pagination request being accepted for the existing artifact.
+
+![Pagination POST Response](./screenshots/alternates/pagination-post-response.png)
+
+After pagination completes, the same artifact can be queried again. In this example, the content count increases from `24` to `36`, showing that additional results were appended to the existing artifact rather than creating a new one.
 
 ```shell
 curl -s http://localhost:7071/api/artifacts/<artifact_id> | jq '{status, content_count: (.contents | length)}'
 ```
 
-**Example Result**
+**Example result after pagination**
 
 ```json
 {
@@ -241,7 +273,9 @@ curl -s http://localhost:7071/api/artifacts/<artifact_id> | jq '{status, content
 }
 ```
 
-![Pagination Screenshot](./screenshots/pagination.png)
+The screenshot below shows the updated content count after pagination.
+
+![Pagination Result Screenshot](./screenshots/pagination.png)
 
 ### Blob Response
 
@@ -255,6 +289,8 @@ curl -s http://localhost:7071/api/blob/<blob_id> --output test.jpg
 
 The requested file is returned with the correct `Content-Type`, such as `image/jpeg` or `video/mp4`.
 
+The screenshot below shows the blob-serving endpoint being used successfully.
+
 ![Blob Serving Screenshot](./screenshots/blob-serving.png)
 
 ---
@@ -263,25 +299,31 @@ The requested file is returned with the correct `Content-Type`, such as `image/j
 
 SQLite is used as the persistence layer with three tables:
 
-- `artifacts` — artifact metadata, status, and pagination cursors
-- `contents` — normalized post and reel data
-- `blobs` — downloaded file paths and blob identifiers
+- `artifacts` — artifact metadata, processing status, profile details, and pagination cursors
+- `contents` — normalized Instagram post and reel data
+- `blobs` — downloaded media file mappings and MIME type metadata
+
+This allows the application to preserve crawl results, support artifact retrieval after processing, and reuse pagination state for subsequent requests.
 
 ---
 
 ## Design Considerations
 
-### Normalization layer for inconsistent upstream responses
+### Extensibility for Future Platform Support
 
-SociaVault responses differ between image posts, video posts, carousel posts, and reels. The normalization layer converts these different response shapes into a single consistent output format so the stored data and API responses remain predictable across content types.
+The integration with the upstream API is isolated inside `external_api.py`, while orchestration, persistence, and HTTP handling are kept in separate modules. Although the current implementation targets Instagram only, this separation makes it easier to extend the project in the future by introducing additional platform-specific normalization functions and request handlers without changing the overall application flow.
 
-### Pagination support
+### Media Normalization
 
-Pagination state is stored so that additional pages of posts or reels can be retrieved without restarting the crawl from the beginning. This makes the API more practical for profiles with larger amounts of content and allows artifact retrieval to continue incrementally.
+SociaVault returns videos in multiple qualities inside a `video_versions` array. The `_extract_best_video` function picks the highest quality version. It also handles fallbacks — if `video_versions` doesn't exist, it tries `video_url` directly, then checks inside a nested `media` object. This ensures robust extraction across different response shapes from the API.
 
-### Extensibility
+### Error Handling and Resilience
 
-The external API integration is separated from the orchestration and persistence layers, making it easier to extend the service to other platforms in the future without changing the overall workflow. This keeps the implementation modular and easier to maintain.
+The implementation is designed to fail gracefully where possible. Failed crawl jobs are logged and marked with a `"failed"` artifact status through the orchestration flow. Reel fetch failures are logged as warnings and do not prevent successful post data from being saved. Blob download failures are also logged and skipped so that the artifact can still be returned even if some media files could not be downloaded. In addition, duplicate in-progress requests are prevented by returning the existing `artifact_id` for the same `case_id` and `identifier`.
+
+### Pydantic Models
+
+Response serialization uses Pydantic models in `models/artifact.py` to validate and structure API responses. Optional fields such as `url`, `thumbnail_url`, `display_name`, and `profile_pic` are omitted when absent, which keeps responses cleaner and more consistent with the expected schema.
 
 ---
 
@@ -305,11 +347,40 @@ These tests verify the normalization layer because the upstream API can return d
 
 These tests verify duplicate-request handling and persistence-related behavior. The tests confirm that an existing in-progress artifact is reused and that a new crawl can start when no matching in-progress artifact exists.
 
-This testing strategy prioritizes correctness for the core transformation and persistence logic while keeping the test suite lightweight and fast to run locally.
+#### `tests/test_function_app.py`
+
+These tests verify HTTP-layer behavior such as request validation, endpoint responses, and overall API handling.
+
+The screenshot below shows the test suite passing locally.
 
 ![Test Results Screenshot](./screenshots/tests-passing.png)
 
 ---
 
+## Additional Validation Screenshots
 
-```
+The following screenshots provide extra evidence for behavior already described above.
+
+### Duplicate Request Reuse (Idempotency)
+
+If the same download request is submitted again while the artifact is still in progress, the API returns the existing `artifact_id` instead of creating a duplicate job.
+
+![Idempotency Response Screenshot](./screenshots/alternates/idempotency-response.png)
+
+### Opened Downloaded Image
+
+After downloading media through the blob endpoint, the returned image can be opened locally.
+
+![Opened Blob Image Screenshot](./screenshots/alternates/blob-opened-image.png)
+
+### Video Blob Download Response
+
+The blob endpoint also supports video media retrieval.
+
+![Blob Video Download Screenshot](./screenshots/alternates/blob-video-download-response.png)
+
+### Opened Downloaded Video Preview
+
+After downloading video content through the blob endpoint, the returned media can be opened locally.
+
+![Opened Video Preview Screenshot](./screenshots/alternates/opened-video-preview.png)
