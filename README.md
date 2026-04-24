@@ -1,52 +1,97 @@
 # Social Media Crawler — Instagram Downloader
 
-A social media crawler backend built with Azure Durable Functions that downloads Instagram posts and reels from public profiles using the SociaVault API.
+A containerized backend service built with Azure Durable Functions for downloading public Instagram posts and reels using the SociaVault API.
 
-## Available Endpoints
+The service accepts a profile identifier, starts crawling asynchronously, stores normalized results in SQLite, and exposes endpoints for artifact creation, retrieval, health monitoring, and blob serving for downloaded media.
+
+---
+
+## Features
+
+- Asynchronous crawl execution using Azure Durable Functions
+- Support for public Instagram posts and reels
+- SQLite-based persistence for artifacts, contents, and blob metadata
+- Pagination support for posts and reels
+- Duplicate in-progress request detection
+- Local blob serving for downloaded media
+- Anonymous local routes for simpler evaluation and local testing
+
+---
+
+## Implemented Endpoints
 
 - `POST /api/artifacts`
-  - Accepts a JSON containing `case_id`, `identifier` and `description` to trigger a new download
-  - Accepts a JSON containing `case_id`, `artifact_id` and `content_type` to paginate for the next page of results (optional)
-  - Returns an `artifact_id` immediately — non-blocking
-  - If a download is still processing for the same `case_id` and `identifier`, returns the existing `artifact_id`
-  - Triggers `polling_orchestrator` in `api_blueprint.py`
+  - Starts a new crawl using `case_id`, `identifier`, and `description`
+  - Supports pagination requests using `case_id`, `artifact_id`, and `content_type`
+  - Returns an `artifact_id` immediately
+  - Reuses the same `artifact_id` if the same request is already in progress
 - `GET /api/artifacts`
-  - Lists all artifacts (processing or completed)
+  - Returns all stored artifacts
 - `GET /api/artifacts/{id}`
-  - Gets a specific artifact by ID with full contents
+  - Returns a specific artifact with metadata and contents
 - `GET /api/health`
-  - Returns `{"status": "ok"}` if healthy
-- `GET /api/blob/{blob_id}` (Optional)
-  - Serves downloaded media files directly for viewing in the browser
+  - Returns `{"status": "ok"}`
+- `GET /api/blob/{blob_id}`
+  - Serves downloaded media files from local storage
+
+---
 
 ## Local Setup
 
 ### Requirements
+
 - [Python 3.10 - 3.13](https://www.python.org/downloads/)
 - [Docker / Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- [Azure Function Core Tools](https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local)
+- [Azure Functions Core Tools](https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local)
 - [SociaVault API Key](https://sociavault.com/)
 
-This project uses Azure Durable Functions internally. For Azure Functions to work, you need Python runtime between 3.10 to 3.13.
+### Option 1: Run with Docker Compose
 
-Ensure you have python (3.10 - 3.13) installed. Run the following commands to build a virtual environment:
+This option starts both the application and Azurite in containers. The application is exposed on port `8080`.
+
+Create a `.env` file:
+
+```env
+SOCIAVAULT_API_KEY=your_real_api_key_here
+```
+
+Start the application:
+
+```shell
+docker compose up --build
+```
+
+Verify that both services are running:
+
+```shell
+docker compose ps
+```
+
+![Docker Compose Service Status](./screenshots/docker-compose-ps.png)
+
+On Apple Silicon, the Compose file uses `platform: linux/amd64` for compatibility.
+
+### Option 2: Run with Azure Functions Core Tools
+
+The API screenshots and example responses below were captured using this local development mode on port `7071`.
+
+Azure Durable Functions requires Azure Storage for orchestration state. For local development, Azurite is used as the storage emulator.
+
+Create and activate a virtual environment:
+
 ```shell
 python -m venv .venv
-```
-For Windows:
-```shell
-.venv\Scripts\activate
-```
-For MacOS/Linux:
-```shell
 source .venv/bin/activate
 ```
-Install the required packages:
+
+Install dependencies:
+
 ```shell
 pip install -r requirements.txt
 ```
 
-A `local.settings.json` file stores app settings and settings used by local development tools for Azure Functions. You may read more about them [here](https://learn.microsoft.com/en-us/azure/azure-functions/functions-develop-local). Create the file with the following contents:
+Create `local.settings.json`:
+
 ```json
 {
   "IsEncrypted": false,
@@ -59,257 +104,212 @@ A `local.settings.json` file stores app settings and settings used by local deve
 }
 ```
 
-For Durable Functions to work, it requires connection to blob storage. For local testing, we can run a fake Azure Blob using Azurite. We can run Azurite using docker, by running the following command:
+Start Azurite:
 
-```docker
+```shell
 docker run -d -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite
 ```
 
-Now you should be able to start the durable function by running the following command:
+Start the Functions app:
+
 ```shell
 func start
 ```
 
-## Architecture
+---
 
-The backend uses **Azure Durable Functions** to handle long-running downloads without blocking the HTTP response.
-
-```
-POST /api/artifacts
-        |
-        v
-trigger_download (HTTP Trigger)
-        |
-        v
-polling_orchestrator (Orchestrator)
-        |
-        |-- startJob (Activity)
-        |       |-- Calls SociaVault API (profile, posts, reels)
-        |       |-- Downloads media files to local blob storage
-        |       `-- Saves results to SQLite
-        |
-        `-- updateStatus (Activity)
-                `-- Updates artifact status to success/failed
-```
-
-1. `POST /api/artifacts` triggers `polling_orchestrator` and returns `artifact_id` immediately
-2. `polling_orchestrator` calls `startJob` which hits SociaVault API
-3. Media files are downloaded and stored locally
-4. Results are saved to SQLite and status updated to `success` or `failed`
-5. Client polls `GET /api/artifacts/{id}` until status is `success`
-
-## Design Considerations
-
-### Future Social Media Integration
-
-The solution is designed with future extensibility in mind. The normalization functions in `external_api.py` produce a platform-agnostic output format (posts, reels, metadata) that other social media platforms can map to. The orchestrator, database, and HTTP endpoints remain unchanged when adding a new platform — only `external_api.py` requires new normalization functions and a new base URL for the target platform. For example, adding TikTok support via SociaVault would only require a new `TIKTOK_BASE_URL` and corresponding `_normalize_tiktok_post` and `_normalize_tiktok_posts_response` functions.
-
-### Media Normalization
-
-SociaVault returns videos in multiple qualities inside a `video_versions` array. The `_extract_best_video` function picks the highest quality version. It also handles fallbacks — if `video_versions` doesn't exist, it tries `video_url` directly, then checks inside a nested `media` object. This ensures robust extraction across different API response shapes.
-
-### Error Handling
-
-- Failed API calls are caught and logged — the artifact status is set to `"failed"`
-- Reel fetch timeouts do not kill the whole job — posts are still saved
-- Failed blob downloads are logged and skipped — the job continues without that media file
-- Duplicate prevention — if the same `case_id` and `identifier` is still processing, the existing `artifact_id` is returned
-
-### Pydantic Models
-
-Response serialization uses Pydantic models (`models/artifact.py`) to validate and serialize API responses. `exclude_none=True` automatically drops optional fields like `url`, `thumbnail_url`, `display_name`, and `profile_pic` when they are not available, keeping responses clean and spec-compliant.
-
-### Database
-
-SQLite with three tables:
-
-- **artifacts** — stores metadata, status, and pagination cursors
-- **contents** — stores normalized post and reel data
-- **blobs** — stores downloaded media file paths and blob IDs
-
-## API Documentation
-
-### POST /api/artifacts — New Download
-
-**Request:**
-```json
-{
-  "case_id": "123",
-  "identifier": "mothershipsg",
-  "description": "Instagram Profile of Mothership"
-}
-```
-
-**Response:**
-```json
-{
-  "artifact_id": "XXX"
-}
-```
-
-### POST /api/artifacts — Pagination (Optional)
-
-**Request:**
-```json
-{
-  "case_id": "123",
-  "artifact_id": "XXX",
-  "content_type": "post"
-}
-```
-
-**Response:**
-```json
-{
-  "artifact_id": "XXX"
-}
-```
-
-### GET /api/artifacts and GET /api/artifacts/{id}
-
-**Response:**
-```json
-[
-  {
-    "status": "success",
-    "has_more_data": [
-      {"content_type": "post", "has_more_data": true},
-      {"content_type": "reel", "has_more_data": true}
-    ],
-    "metadata": {
-      "platform": "instagram",
-      "identifier": "mothershipsg",
-      "display_name": "Mothership",
-      "profile_pic": "http://<image_url>",
-      "description": "Instagram Profile of Mothership"
-    },
-    "contents": [
-      {
-        "error_message": "",
-        "owners": ["mothershipsg"],
-        "caption": "XXX",
-        "datetime": "2024-01-01T12:12:12Z",
-        "content_type": "post",
-        "media_content": [
-          {
-            "media_type": "image",
-            "original_url": "http://<image_url>",
-            "url": "/api/blob/<blob_id>"
-          },
-          {
-            "media_type": "video",
-            "original_url": "http://<image_url>",
-            "original_thumbnail_url": "http://<image_url>",
-            "url": "/api/blob/<blob_id>",
-            "thumbnail_url": "/api/blob/<blob_id>"
-          }
-        ]
-      },
-      {
-        "error_message": "",
-        "owners": ["mothershipsg"],
-        "caption": "XXX",
-        "datetime": "2024-02-01T12:12:12Z",
-        "content_type": "reel",
-        "media_content": [
-          {
-            "media_type": "video",
-            "original_url": "http://<image_url>",
-            "original_thumbnail_url": "http://<image_url>",
-            "url": "/api/blob/<blob_id>",
-            "thumbnail_url": "/api/blob/<blob_id>"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "status": "processing",
-    "has_more_data": [
-      {"content_type": "post", "has_more_data": false},
-      {"content_type": "reel", "has_more_data": false}
-    ],
-    "metadata": {
-      "platform": "instagram",
-      "identifier": "mothershipsg",
-      "description": "Instagram Profile of Mothership"
-    },
-    "contents": []
-  }
-]
-```
-
-### GET /api/health
-
-**Response:**
-```json
-{"status": "ok"}
-```
-
-### GET /api/blob/{blob_id}
-
-Returns raw file content with appropriate `Content-Type` header (e.g. `image/jpeg`, `video/mp4`).
-
-## Example Requests & Responses
+## API Examples
 
 ### Health Check
+
 ```shell
 curl -s http://localhost:7071/api/health | jq
 ```
 
-### Trigger New Download
+**Response**
+
+```json
+{
+  "status": "ok"
+}
+```
+
+![Health Check Screenshot](./screenshots/health-check.png)
+
+### Start New Download
+
 ```shell
 curl -s -X POST http://localhost:7071/api/artifacts \
   -H "Content-Type: application/json" \
-  -d '{"case_id": "123", "identifier": "mothershipsg", "description": "Instagram Profile of Mothership"}' | jq
+  -d '{"case_id":"123","identifier":"mothershipsg","description":"Instagram Profile of Mothership"}' | jq
 ```
 
-### Poll for Status
+**Response**
+
+```json
+{
+  "artifact_id": "XXX"
+}
+```
+
+![Start Download Screenshot](./screenshots/start-download.png)
+
+### Poll Artifact Status
+
 ```shell
-curl -s http://localhost:7071/api/artifacts/<artifact_id> | jq '{status, has_more_data, metadata}'
+curl -s http://localhost:7071/api/artifacts/<artifact_id> | jq
 ```
 
-### List All Artifacts
+**Response**
+
+```json
+{
+  "status": "processing",
+  "has_more_data": [
+    { "content_type": "post", "has_more_data": false },
+    { "content_type": "reel", "has_more_data": false }
+  ],
+  "metadata": {
+    "platform": "instagram",
+    "identifier": "mothershipsg",
+    "description": "Instagram Profile of Mothership"
+  }
+}
+```
+
+![Artifact Processing Screenshot](./screenshots/artifact-processing.png)
+
+### Completed Artifact Response
+
 ```shell
-curl -s http://localhost:7071/api/artifacts | jq
+curl -s http://localhost:7071/api/artifacts/<artifact_id> | jq '{status, metadata: {identifier: .metadata.identifier}, contents: [.contents[0] | {content_type, media_content: [.media_content[0] | {url}]}]}'
 ```
 
-### Paginate Posts
+**Response**
+
+```json
+{
+  "status": "success",
+  "metadata": {
+    "identifier": "mothershipsg"
+  },
+  "contents": [
+    {
+      "content_type": "post",
+      "media_content": [
+        {
+          "url": "/api/blob/<blob_id>"
+        }
+      ]
+    }
+  ]
+}
+```
+
+![Artifact Success Screenshot](./screenshots/artifact-success.png)
+
+### Pagination
+
+Pagination is triggered with a `POST /api/artifacts` request using the existing `artifact_id` and a `content_type` such as `post` or `reel`.
+
 ```shell
 curl -s -X POST http://localhost:7071/api/artifacts \
   -H "Content-Type: application/json" \
-  -d '{"case_id": "123", "artifact_id": "<artifact_id>", "content_type": "post"}' | jq
+  -d '{"case_id":"123","artifact_id":"<artifact_id>","content_type":"post"}' | jq
 ```
 
-### Serve Blob
-```shell
-curl -s http://localhost:7071/api/blob/<blob_id> --output test.jpg && open test.jpg
+**Response**
+
+```json
+{
+  "artifact_id": "XXX"
+}
 ```
 
-## Running Tests
+To verify that pagination appended more results, the artifact can be queried again and the content count compared:
 
 ```shell
-pip install pytest
+curl -s http://localhost:7071/api/artifacts/<artifact_id> | jq '{status, content_count: (.contents | length)}'
+```
+
+**Example Result**
+
+```json
+{
+  "status": "success",
+  "content_count": 36
+}
+```
+
+![Pagination Screenshot](./screenshots/pagination.png)
+
+### Blob Response
+
+Blob URLs returned in artifact contents can be downloaded directly through the blob endpoint.
+
+```shell
+curl -s http://localhost:7071/api/blob/<blob_id> --output test.jpg
+```
+
+**Response**
+
+The requested file is returned with the correct `Content-Type`, such as `image/jpeg` or `video/mp4`.
+
+![Blob Serving Screenshot](./screenshots/blob-serving.png)
+
+---
+
+## Data Storage
+
+SQLite is used as the persistence layer with three tables:
+
+- `artifacts` — artifact metadata, status, and pagination cursors
+- `contents` — normalized post and reel data
+- `blobs` — downloaded file paths and blob identifiers
+
+---
+
+## Design Considerations
+
+### Normalization layer for inconsistent upstream responses
+
+SociaVault responses differ between image posts, video posts, carousel posts, and reels. The normalization layer converts these different response shapes into a single consistent output format so the stored data and API responses remain predictable across content types.
+
+### Pagination support
+
+Pagination state is stored so that additional pages of posts or reels can be retrieved without restarting the crawl from the beginning. This makes the API more practical for profiles with larger amounts of content and allows artifact retrieval to continue incrementally.
+
+### Extensibility
+
+The external API integration is separated from the orchestration and persistence layers, making it easier to extend the service to other platforms in the future without changing the overall workflow. This keeps the implementation modular and easier to maintain.
+
+---
+
+## Testing
+
+Run the test suite with:
+
+```shell
 pytest tests/ -v
 ```
 
-### Why these tests
+### Testing approach and justification
 
-The unit tests focus on two areas: the normalization functions in `external_api.py` and the idempotency logic in `db.py`. These were chosen because they contain the most critical business logic that is also easily testable without requiring a live API connection or database.
+The test coverage focuses on the parts of the system that contain the most important application logic and can be validated reliably without depending on a live SociaVault request or full Azure infrastructure.
 
-**`tests/test_external_api.py`** — The SociaVault API returns raw Instagram data in varying shapes depending on the content type (image, video, carousel, reel). The normalization functions parse and transform this raw data into the standardized format expected by the app. Testing these in isolation ensures:
+#### `tests/test_external_api.py`
 
-- Image posts are correctly identified and their URLs extracted
-- Video posts pick the highest quality URL from the `video_versions` array
-- Carousel posts return all media items, not just the first one
-- Reels with no video URL are filtered out and not saved to the database
-- Pagination cursors and `more_available` flags are correctly extracted from both posts and reels responses
-- The `content_type` field is always set correctly (`"post"` or `"reel"`)
-- The `owners` field always contains the identifier of the profile being crawled
+These tests verify the normalization layer because the upstream API can return different structures for image posts, video posts, carousel posts, and reels. The tests confirm that media URLs are extracted correctly, invalid reels are filtered out, and pagination fields are parsed as expected.
 
-**`tests/test_db.py`** — If a download is still processing, the same `artifact_id` should be returned instead of starting a new job. Testing this ensures:
+#### `tests/test_db.py`
 
-- `find_in_progress_artifact` correctly returns an existing `artifact_id` when a matching processing record exists
-- `find_in_progress_artifact` returns `None` when no matching record is found, allowing a new download to be triggered
+These tests verify duplicate-request handling and persistence-related behavior. The tests confirm that an existing in-progress artifact is reused and that a new crawl can start when no matching in-progress artifact exists.
+
+This testing strategy prioritizes correctness for the core transformation and persistence logic while keeping the test suite lightweight and fast to run locally.
+
+![Test Results Screenshot](./screenshots/tests-passing.png)
+
+---
+
+
 ```
-
