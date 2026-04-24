@@ -309,25 +309,21 @@ This allows the application to preserve crawl results, support artifact retrieva
 
 ## Design Considerations
 
-### Normalization layer for inconsistent upstream responses
+### Extensibility for Future Platform Support
 
-SociaVault responses can differ between image posts, video posts, carousel posts, and reels. The normalization layer converts these different response shapes into a single consistent output format so the stored data and API responses remain predictable across content types.
+The integration with the upstream API is isolated inside `external_api.py`, while orchestration, persistence, and HTTP handling are kept in separate modules. Although the current implementation targets Instagram only, this separation makes it easier to extend the project in the future by introducing additional platform-specific normalization functions and request handlers without changing the overall application flow.
 
-### Asynchronous processing
+### Media Normalization
 
-Artifact creation returns immediately with an `artifact_id`, while Azure Durable Functions performs the long-running crawl in the background. This avoids blocking the request and makes the API suitable for crawls that take longer to complete.
+SociaVault responses can vary across image posts, video posts, carousel posts, and reels. The normalization layer converts these different response shapes into a consistent internal format so that downstream storage and API responses remain predictable. For video content, the extraction logic handles multiple possible response structures and falls back across different fields when needed, improving robustness against inconsistent upstream payloads.
 
-### Duplicate request reuse
+### Error Handling and Resilience
 
-If the same `case_id` and `identifier` are submitted while an artifact is still in progress, the API returns the existing `artifact_id` instead of creating a duplicate crawl. This prevents unnecessary duplicate work and avoids storing redundant records.
+The implementation is designed to fail gracefully where possible. Failed crawl jobs are logged and marked with a `"failed"` artifact status through the orchestration flow. Reel fetch failures are logged as warnings and do not prevent successful post data from being saved. Blob download failures are also logged and skipped so that the artifact can still be returned even if some media files could not be downloaded. In addition, duplicate in-progress requests are prevented by returning the existing `artifact_id` for the same `case_id` and `identifier`.
 
-### Pagination support
+### Pydantic Models
 
-Pagination state is stored so that additional pages of posts or reels can be retrieved without restarting the crawl from the beginning. This makes the API more practical for profiles with larger amounts of content and allows artifact retrieval to continue incrementally.
-
-### Extensibility
-
-The external API integration is separated from the orchestration and persistence layers, making it easier to extend the service to other platforms in the future without changing the overall workflow.
+Response serialization uses Pydantic models in `models/artifact.py` to validate and structure API responses. Optional fields such as `url`, `thumbnail_url`, `display_name`, and `profile_pic` are omitted when absent, which keeps responses cleaner and more consistent with the expected schema.
 
 ---
 
